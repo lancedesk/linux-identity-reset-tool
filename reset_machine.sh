@@ -324,6 +324,37 @@ randomize_mac()
     echo -e "${GREEN}[✓] MAC addresses randomized${NC}"
 }
 
+# Temporary MAC randomization (resets on reboot - safe for dual-boot)
+randomize_mac_temporary()
+{
+    if [[ "$DRY_RUN" == true ]]; then
+        echo -e "${PURPLE}[DRY-RUN] Would temporarily randomize MAC addresses${NC}"
+        return 0
+    fi
+    
+    echo -e "${GREEN}[+] Temporarily randomizing MAC address (will reset on reboot)...${NC}"
+    
+    for iface in $(ip link show | awk -F: '$1 ~ /^[0-9]+$/ {print $2}' | tr -d ' '); do
+        if [[ "$iface" != "lo" ]]; then
+            echo -e "${YELLOW}[*] Temporarily changing MAC for interface: $iface${NC}"
+            # Generate random MAC with locally administered bit set
+            new_mac=$(printf '02:%02x:%02x:%02x:%02x:%02x' $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)) $((RANDOM%256)))
+            
+            if [[ $EUID -eq 0 ]]; then
+                ip link set "$iface" down
+                ip link set "$iface" address "$new_mac"
+                ip link set "$iface" up
+            else
+                sudo ip link set "$iface" down
+                sudo ip link set "$iface" address "$new_mac"
+                sudo ip link set "$iface" up
+            fi
+            echo -e "${GREEN}[✓] Temporary MAC set to: $new_mac${NC}"
+        fi
+    done
+    echo -e "${GREEN}[✓] MAC addresses temporarily randomized (will revert on reboot)${NC}"
+}
+
 # Randomize hostname
 randomize_hostname()
 {
@@ -457,7 +488,25 @@ read -r doreset
 if [[ "$doreset" == "y" ]]; then
     backup_originals
     reset_fingerprints
-    randomize_mac
+    
+    echo -e "${BLUE}Do you want to randomize MAC addresses? ${NC}"
+    echo -e "${YELLOW}[!] WARNING: On dual-boot systems, MAC changes affect both OSes${NC}"
+    echo -e "  ${GREEN}1)${NC} No - Skip MAC randomization (safest for dual-boot)"
+    echo -e "  ${GREEN}2)${NC} Temporary - Change for this session only (resets on reboot)"
+    echo -e "  ${GREEN}3)${NC} Permanent - Change permanently (may cause Windows issues)"
+    read -r domac
+    case "$domac" in
+        2)
+            randomize_mac_temporary
+            ;;
+        3)
+            randomize_mac
+            ;;
+        *)
+            echo -e "${YELLOW}[*] Skipping MAC randomization${NC}"
+            ;;
+    esac
+    
     randomize_hostname
     clear_histories
 fi
