@@ -6,6 +6,7 @@
 #  - Randomizes MAC address & hostname
 #  - Supports Undo (restores original machine-id, MAC, hostname)
 #  - Added: Root privilege check, dry-run mode, enhanced backup
+#  - Fixed: /etc/hosts update for hostname resolution
 # ===============================================================
 
 # Colors
@@ -98,6 +99,11 @@ backup_originals()
             fi
         fi
         
+        # Backup /etc/hosts entries for hostname resolution
+        if [[ -f /etc/hosts ]]; then
+            echo "HOSTS_127_0_1_1=$(grep '^127.0.1.1' /etc/hosts | head -n1)"
+        fi
+        
     } > "$BACKUP_FILE"
 
     # Save MAC addresses for all non-loopback interfaces
@@ -129,7 +135,9 @@ show_dry_run_changes()
     echo -e "\n${YELLOW}System fingerprint changes:${NC}"
     echo -e "  ${RED}Would regenerate:${NC} /etc/machine-id"
     echo -e "  ${RED}Would regenerate:${NC} /var/lib/dbus/machine-id"
-    echo -e "  ${RED}Would change hostname to:${NC} $(generate_random_hostname)"
+    local new_hostname=$(generate_random_hostname)
+    echo -e "  ${RED}Would change hostname to:${NC} $new_hostname"
+    echo -e "  ${RED}Would update /etc/hosts:${NC} 127.0.1.1 → $new_hostname"
     
     echo -e "\n${YELLOW}MAC address changes:${NC}"
     ip link show | awk -F: '$1 ~ /^[0-9]+$/ {print $2}' | tr -d ' ' | while read -r iface; do
@@ -190,6 +198,16 @@ restore_originals()
             echo "$ETC_HOSTNAME" | sudo tee /etc/hostname >/dev/null
         fi
         echo -e "${YELLOW}[*] /etc/hostname restored${NC}"
+    fi
+    
+    # Restore /etc/hosts entry
+    if [[ -n "$HOSTS_127_0_1_1" ]]; then
+        if [[ $EUID -eq 0 ]]; then
+            sed -i "s/^127.0.1.1.*/$HOSTS_127_0_1_1/" /etc/hosts
+        else
+            sudo sed -i "s/^127.0.1.1.*/$HOSTS_127_0_1_1/" /etc/hosts
+        fi
+        echo -e "${YELLOW}[*] /etc/hosts entry restored${NC}"
     fi
 
     # Restore machine-id
@@ -309,21 +327,42 @@ randomize_mac()
 # Randomize hostname
 randomize_hostname()
 {
+    local new_hostname=$(generate_random_hostname)
+    
     if [[ "$DRY_RUN" == true ]]; then
-        local new_hostname=$(generate_random_hostname)
         echo -e "${PURPLE}[DRY-RUN] Would change hostname to: $new_hostname${NC}"
         return 0
     fi
     
     echo -e "${GREEN}[+] Changing hostname...${NC}"
-    new_hostname=$(generate_random_hostname)
     echo -e "${YELLOW}[*] New hostname: $new_hostname${NC}"
+    
+    # Set the hostname
     if [[ $EUID -eq 0 ]]; then
         hostnamectl set-hostname "$new_hostname"
     else
         sudo hostnamectl set-hostname "$new_hostname"
     fi
-    echo -e "${GREEN}[✓] Hostname changed${NC}"
+    
+    # Update /etc/hosts to prevent "unable to resolve host" errors
+    echo -e "${YELLOW}[*] Updating /etc/hosts for hostname resolution...${NC}"
+    if [[ $EUID -eq 0 ]]; then
+        # Check if 127.0.1.1 entry exists
+        if grep -q "^127.0.1.1" /etc/hosts; then
+            sed -i "s/^127.0.1.1.*/127.0.1.1\t$new_hostname/" /etc/hosts
+        else
+            # Add it if it doesn't exist
+            echo -e "127.0.1.1\t$new_hostname" >> /etc/hosts
+        fi
+    else
+        if grep -q "^127.0.1.1" /etc/hosts; then
+            sudo sed -i "s/^127.0.1.1.*/127.0.1.1\t$new_hostname/" /etc/hosts
+        else
+            echo -e "127.0.1.1\t$new_hostname" | sudo tee -a /etc/hosts >/dev/null
+        fi
+    fi
+    
+    echo -e "${GREEN}[✓] Hostname changed and /etc/hosts updated${NC}"
 }
 
 # Clear histories
